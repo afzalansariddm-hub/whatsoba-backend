@@ -21,7 +21,6 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
 RUN mkdir -p /data/sessions /app/uploads/media
-VOLUME ["/data/sessions"]
 
 EXPOSE 3001
 
