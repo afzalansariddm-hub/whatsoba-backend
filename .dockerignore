@@ -1,0 +1,12 @@
+node_modules
+dist
+uploads
+sessions
+.git
+.github
+.cursor
+terminals
+agent-transcripts
+*.log
+.env
+.env.*
