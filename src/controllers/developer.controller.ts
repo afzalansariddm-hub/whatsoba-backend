@@ -17,6 +17,66 @@ function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function decodeBase64UrlJson(value: string): Record<string, unknown> | null {
+  try {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    const decoded = Buffer.from(padded, 'base64').toString('utf8');
+    const parsed = JSON.parse(decoded) as Record<string, unknown>;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function readWorkspaceIdFromJwt(request: Request): string | undefined {
+  const authorization = request.header('authorization');
+
+  if (!authorization) {
+    return undefined;
+  }
+
+  const token = authorization.trim().startsWith('Bearer ') ? authorization.trim().slice(7).trim() : authorization.trim();
+
+  if (!token || token.startsWith('sk_live_')) {
+    return undefined;
+  }
+
+  const parts = token.split('.');
+
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  const payload = decodeBase64UrlJson(parts[1]);
+
+  if (!payload) {
+    return undefined;
+  }
+
+  const direct =
+    readString(payload.workspaceId) ??
+    readString(payload.workspace_id) ??
+    readString(payload.workspace) ??
+    readString(payload.wid);
+
+  if (direct) {
+    return direct;
+  }
+
+  const appMetadata = payload.app_metadata as Record<string, unknown> | undefined;
+  const userMetadata = payload.user_metadata as Record<string, unknown> | undefined;
+
+  return (
+    readString(appMetadata?.workspaceId) ??
+    readString(appMetadata?.workspace_id) ??
+    readString(appMetadata?.workspace) ??
+    readString(userMetadata?.workspaceId) ??
+    readString(userMetadata?.workspace_id) ??
+    readString(userMetadata?.workspace)
+  );
+}
+
 function readWorkspaceId(request: Request): string {
   const authenticatedRequest = request as AuthenticatedRequest;
   const body = request.body as WorkspaceSource | undefined;
@@ -31,9 +91,11 @@ function readWorkspaceId(request: Request): string {
     readString(localsUser?.workspace_id) ??
     readString(localsAuth?.workspaceId) ??
     readString(localsAuth?.workspace_id) ??
+    readWorkspaceIdFromJwt(request) ??
     readString(body?.workspaceId) ??
     readString(body?.workspace_id) ??
-    readString(request.query.workspaceId);
+    readString(request.query.workspaceId) ??
+    readString(request.headers['x-workspace-id']);
 
   if (!workspaceId) {
     throw new AppError('workspaceId is required', 401);
