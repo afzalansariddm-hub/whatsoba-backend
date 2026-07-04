@@ -15,10 +15,10 @@ export interface ConversationRecord {
   last_message: string | null;
   last_message_type: string | null;
   last_message_at: string | null;
-  unread_count: number | null;
-  is_group: boolean | null;
-  is_archived: boolean | null;
-  is_pinned: boolean | null;
+  unread_count: number;
+  is_group: boolean;
+  is_archived: boolean;
+  is_pinned: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -64,6 +64,13 @@ interface ConversationRow {
   created_at: string;
   updated_at: string;
 }
+
+type ConversationInsertRow = Omit<ConversationRow, 'unread_count' | 'is_group' | 'is_archived' | 'is_pinned'> & {
+  unread_count: number | null;
+  is_group: boolean | null;
+  is_archived: boolean | null;
+  is_pinned: boolean | null;
+};
 
 type ConversationSnapshot = Pick<
   ConversationRecord,
@@ -136,7 +143,7 @@ function extractLastMessage(chat: SyncChatLike): { lastMessage: string | null; l
 }
 
 export function ensureConversationRowDefaults(
-  row: ConversationRow,
+  row: ConversationInsertRow,
   now: string = nowIso()
 ): { row: ConversationRow; defaultedFields: string[] } {
   const defaultedFields: string[] = [];
@@ -544,9 +551,9 @@ export class ConversationRepository {
           is_pinned: summary.is_pinned ?? existing?.is_pinned ?? false,
           created_at: existing?.created_at ?? now,
           updated_at: now
-        } satisfies ConversationRow;
+        } satisfies ConversationInsertRow;
       })
-      .filter((row): row is ConversationRow => row !== null);
+      .filter((row): row is ConversationInsertRow => row !== null);
     const normalizedRows = rows.map((row) => ensureConversationRowDefaults(row, now));
     const rowsFixed = normalizedRows.filter(({ defaultedFields }) => defaultedFields.length > 0).length;
     const fieldsDefaulted = Array.from(new Set(normalizedRows.flatMap(({ defaultedFields }) => defaultedFields)));
