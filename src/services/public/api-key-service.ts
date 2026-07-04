@@ -41,7 +41,7 @@ export interface ApiKeyMetadata {
 
 function normalizeName(value: string | undefined): string {
   const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : 'Default API Key';
+  return trimmed && trimmed.length > 0 ? trimmed : 'Default';
 }
 
 function hashKey(rawKey: string): string {

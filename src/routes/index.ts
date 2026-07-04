@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 import { chatRouter } from './chatRoutes';
+import { developerRouter } from './developer.routes';
 import { contactRouter } from './contactRoutes';
 import { dashboardRouter } from './dashboardRoutes';
 import { healthRouter } from './health.routes';
@@ -11,6 +12,7 @@ import { sessionsRouter } from './sessions.routes';
 export const apiRouter = Router();
 
 apiRouter.use(healthRouter);
+apiRouter.use('/developer', developerRouter);
 apiRouter.use('/chats', chatRouter);
 apiRouter.use('/contacts', contactRouter);
 apiRouter.use('/dashboard', dashboardRouter);
