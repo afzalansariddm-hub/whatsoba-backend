@@ -8,9 +8,13 @@ export type {
   ChatListFilters,
   ChatListItem,
   ChatMessageFilters,
+  ContactConversationItem,
+  ContactConversationsFilters,
   ContactDetail,
   ContactListFilters,
   ContactListItem,
+  ContactMessageItem,
+  ContactMessagesFilters,
   DashboardSummary,
   SortDirection
 } from './types';

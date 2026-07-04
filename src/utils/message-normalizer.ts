@@ -5,6 +5,15 @@ type MessageContent = {
   extendedTextMessage?: {
     text?: string;
   };
+  imageMessage?: unknown;
+  videoMessage?: unknown;
+  audioMessage?: unknown;
+  pttMessage?: unknown;
+  documentMessage?: unknown;
+  stickerMessage?: unknown;
+  locationMessage?: unknown;
+  contactMessage?: unknown;
+  reactionMessage?: unknown;
 };
 
 type MessageKey = {
@@ -31,6 +40,42 @@ function getMessageType(message: MessageContent | undefined): IncomingMessageTyp
 
   if (message?.extendedTextMessage?.text) {
     return 'extendedTextMessage';
+  }
+
+  if (message?.imageMessage) {
+    return 'imageMessage';
+  }
+
+  if (message?.videoMessage) {
+    return 'videoMessage';
+  }
+
+  if (message?.audioMessage) {
+    return 'audioMessage';
+  }
+
+  if (message?.pttMessage) {
+    return 'voiceMessage';
+  }
+
+  if (message?.documentMessage) {
+    return 'documentMessage';
+  }
+
+  if (message?.stickerMessage) {
+    return 'stickerMessage';
+  }
+
+  if (message?.locationMessage) {
+    return 'locationMessage';
+  }
+
+  if (message?.contactMessage) {
+    return 'contactMessage';
+  }
+
+  if (message?.reactionMessage) {
+    return 'reactionMessage';
   }
 
   return 'unknown';

@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 
 import { sessionManager } from '../sessions';
+import { emitRealtimeSocketEvent } from '../socket/session-events';
 import { webhookDispatcher } from '../webhooks';
 import { AppError } from '../utils/app-error';
 import type { SendMediaMessageInput, SendMediaMessageResult, SendTextMessageInput, SendTextMessageResult } from '../types/message';
@@ -67,6 +68,21 @@ export class MessageService {
       })
     );
 
+    emitRealtimeSocketEvent(
+      'message.created',
+      {
+        connectionId: input.connectionId,
+        messageId: message.key.id,
+        chatId: input.chatId,
+        direction: 'outbound',
+        type: 'text',
+        text: input.text,
+        status: 'SENT',
+        timestamp
+      },
+      `${input.connectionId}:${input.chatId}:${message.key.id}:created`
+    );
+
     return {
       messageId: message.key.id,
       timestamp,
@@ -117,6 +133,21 @@ export class MessageService {
         type: mediaKind,
         text: input.caption ?? null
       })
+    );
+
+    emitRealtimeSocketEvent(
+      'message.created',
+      {
+        connectionId: input.connectionId,
+        messageId: message.key.id,
+        chatId: input.chatId,
+        direction: 'outbound',
+        type: mediaKind,
+        text: input.caption ?? null,
+        status: 'SENT',
+        timestamp
+      },
+      `${input.connectionId}:${input.chatId}:${message.key.id}:created`
     );
 
     return {

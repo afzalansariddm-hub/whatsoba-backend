@@ -1,7 +1,15 @@
 import type { Request } from 'express';
 
 import { AppError } from '../../utils/app-error';
-import type { ApiContext, ChatListFilters, ChatMessageFilters, ContactListFilters, SortDirection } from './types';
+import type {
+  ApiContext,
+  ChatListFilters,
+  ChatMessageFilters,
+  ContactConversationsFilters,
+  ContactListFilters,
+  ContactMessagesFilters,
+  SortDirection
+} from './types';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -216,4 +224,30 @@ export function parseChatJid(request: Request): string {
 
 export function parseConnectionId(request: Request): string | undefined {
   return readConnectionId(request);
+}
+
+export function parseContactConversationsFilters(request: Request): ContactConversationsFilters {
+  const context = parseApiContext(request);
+  const sort = parseSortDirection(request.query.sort, 'desc');
+
+  return {
+    ...context,
+    contactId: parseContactId(request),
+    limit: parseLimit(request.query.limit, DEFAULT_LIMIT, MAX_LIMIT),
+    offset: parseOffset(request.query.offset),
+    sort
+  };
+}
+
+export function parseContactMessagesFilters(request: Request): ContactMessagesFilters {
+  const context = parseApiContext(request);
+  const sort = parseSortDirection(request.query.sort, 'desc');
+
+  return {
+    ...context,
+    contactId: parseContactId(request),
+    limit: parseLimit(request.query.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT),
+    offset: parseOffset(request.query.offset),
+    sort
+  };
 }

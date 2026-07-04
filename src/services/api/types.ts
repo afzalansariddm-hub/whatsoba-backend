@@ -57,24 +57,74 @@ export interface ContactListFilters extends ApiContext {
   sort: SortDirection;
 }
 
+export interface ContactConversationItem {
+  id: string;
+  chatJid: string;
+  lastMessage: string | null;
+  lastMessageType: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+  isGroup: boolean;
+  isArchived: boolean;
+  isPinned: boolean;
+  messageCount: number;
+}
+
+export interface ContactMessageItem {
+  id: string;
+  messageId: string;
+  conversationId: string;
+  chatJid: string;
+  sender: string | null;
+  recipient: string | null;
+  direction: 'inbound' | 'outbound';
+  type: string;
+  text: string | null;
+  mediaUrl: string | null;
+  status: string;
+  timestamp: string;
+}
+
 export interface ContactListItem {
   id: string;
   displayName: string | null;
   phone: string | null;
   avatar: string | null;
+  about: string | null;
   isBusiness: boolean;
   lastSeen: string | null;
-  conversationCount: number;
+  firstMessageAt: string | null;
   lastMessageAt: string | null;
+  conversationCount: number;
+  messageCount: number;
+  lastActivity: string | null;
+  latestConversation: ContactConversationItem | null;
+}
+
+export interface ContactConversationsFilters extends ApiContext {
+  contactId: string;
+  limit: number;
+  offset: number;
+  sort: SortDirection;
+}
+
+export interface ContactMessagesFilters extends ApiContext {
+  contactId: string;
+  limit: number;
+  offset: number;
+  sort: SortDirection;
 }
 
 export interface ContactDetail {
-  contact: unknown;
-  latestConversation: unknown;
+  contact: ContactListItem;
+  latestConversation: ContactConversationItem | null;
   statistics: {
     conversationCount: number;
+    messageCount: number;
     messagesSent: number;
     messagesReceived: number;
+    firstMessageAt: string | null;
+    lastMessageAt: string | null;
     lastActivity: string | null;
   };
 }

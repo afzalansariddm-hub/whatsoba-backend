@@ -97,6 +97,12 @@ create index if not exists whatsapp_contacts_workspace_connection_idx
 create index if not exists whatsapp_contacts_phone_idx
   on public.whatsapp_contacts (workspace_id, connection_id, phone);
 
+create index if not exists whatsapp_contacts_updated_at_idx
+  on public.whatsapp_contacts (workspace_id, connection_id, updated_at desc);
+
+create index if not exists whatsapp_contacts_last_seen_idx
+  on public.whatsapp_contacts (workspace_id, connection_id, last_seen desc nulls last);
+
 create index if not exists whatsapp_contacts_jid_lookup_idx
   on public.whatsapp_contacts (workspace_id, connection_id, jid);
 

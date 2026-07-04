@@ -73,8 +73,22 @@ function toContactRow(context: SyncContext, contact: SyncContactLike): ContactRo
     connection_id: context.connectionId,
     jid,
     phone: getPhoneFromJid(jid),
-    display_name: typeof contact.name === 'string' && contact.name.trim().length > 0 ? contact.name.trim() : typeof contact.notify === 'string' && contact.notify.trim().length > 0 ? contact.notify.trim() : null,
-    push_name: typeof contact.notify === 'string' && contact.notify.trim().length > 0 ? contact.notify.trim() : typeof contact.name === 'string' && contact.name.trim().length > 0 ? contact.name.trim() : null,
+    display_name:
+      typeof contact.name === 'string' && contact.name.trim().length > 0
+        ? contact.name.trim()
+        : typeof contact.verifiedName === 'string' && contact.verifiedName.trim().length > 0
+          ? contact.verifiedName.trim()
+          : typeof contact.notify === 'string' && contact.notify.trim().length > 0
+            ? contact.notify.trim()
+            : null,
+    push_name:
+      typeof contact.notify === 'string' && contact.notify.trim().length > 0
+        ? contact.notify.trim()
+        : typeof contact.name === 'string' && contact.name.trim().length > 0
+          ? contact.name.trim()
+          : typeof contact.verifiedName === 'string' && contact.verifiedName.trim().length > 0
+            ? contact.verifiedName.trim()
+            : null,
     profile_photo: typeof contact.imgUrl === 'string' && contact.imgUrl.trim().length > 0 ? contact.imgUrl.trim() : typeof contact.img_url === 'string' && contact.img_url.trim().length > 0 ? contact.img_url.trim() : null,
     is_business: typeof contact.isBusiness === 'boolean' ? contact.isBusiness : null,
     last_seen: lastSeen,
@@ -87,14 +101,14 @@ async function fetchExistingContacts(
   supabase: SupabaseClient,
   context: SyncContext,
   jids: string[]
-): Promise<Map<string, { id: string; created_at: string }>> {
+): Promise<Map<string, { id: string; created_at: string; phone: string | null; display_name: string | null; push_name: string | null; profile_photo: string | null; is_business: boolean | null; last_seen: string | null }>> {
   if (jids.length === 0) {
     return new Map();
   }
 
   const { data, error } = await supabase
     .from(SUPABASE_SYNC_TABLES.contacts)
-    .select('id,jid,created_at')
+    .select('id,jid,phone,display_name,push_name,profile_photo,is_business,last_seen,created_at')
     .eq('workspace_id', context.workspaceId)
     .eq('connection_id', context.connectionId)
     .in('jid', jids);
@@ -107,7 +121,23 @@ async function fetchExistingContacts(
     (data ?? []).flatMap((row) => {
       const jid = normalizeJid((row as { jid?: string | null }).jid);
 
-      return jid ? [[jid, { id: String((row as { id?: string | number }).id), created_at: String((row as { created_at?: string }).created_at ?? nowIso()) }]] : [];
+      return jid
+        ? [
+            [
+              jid,
+              {
+                id: String((row as { id?: string | number }).id),
+                phone: (row as { phone?: string | null }).phone ?? null,
+                display_name: (row as { display_name?: string | null }).display_name ?? null,
+                push_name: (row as { push_name?: string | null }).push_name ?? null,
+                profile_photo: (row as { profile_photo?: string | null }).profile_photo ?? null,
+                is_business: (row as { is_business?: boolean | null }).is_business ?? null,
+                last_seen: (row as { last_seen?: string | null }).last_seen ?? null,
+                created_at: String((row as { created_at?: string }).created_at ?? nowIso())
+              }
+            ]
+          ]
+        : [];
     })
   );
 }
@@ -131,6 +161,12 @@ export class ContactRepository {
 
       return {
         ...row,
+        phone: row.phone ?? existing?.phone ?? null,
+        display_name: row.display_name ?? existing?.display_name ?? null,
+        push_name: row.push_name ?? existing?.push_name ?? null,
+        profile_photo: row.profile_photo ?? existing?.profile_photo ?? null,
+        is_business: row.is_business ?? existing?.is_business ?? null,
+        last_seen: row.last_seen ?? existing?.last_seen ?? null,
         created_at: existing?.created_at ?? row.created_at,
         updated_at: now
       };

@@ -59,3 +59,13 @@ export function maxIso(values: Array<string | null | undefined>): string | null 
 
   return filtered.sort().at(-1) ?? null;
 }
+
+export function minIso(values: Array<string | null | undefined>): string | null {
+  const filtered = values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  if (filtered.length === 0) {
+    return null;
+  }
+
+  return filtered.sort().at(0) ?? null;
+}

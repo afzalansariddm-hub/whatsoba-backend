@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { AppError } from '../utils/app-error';
 import { sendSuccess } from '../utils/api-response';
 import { contactService } from '../services/api';
-import { parseApiContext, parseContactId, parseContactListFilters } from '../services/api/query';
+import { parseApiContext, parseContactConversationsFilters, parseContactId, parseContactListFilters, parseContactMessagesFilters } from '../services/api/query';
 
 export async function listContacts(request: Request, response: Response): Promise<void> {
   const data = await contactService.listContacts(parseContactListFilters(request));
@@ -19,4 +19,14 @@ export async function getContact(request: Request, response: Response): Promise<
   }
 
   sendSuccess(response, 200, contact);
+}
+
+export async function listContactConversations(request: Request, response: Response): Promise<void> {
+  const data = await contactService.listContactConversations(parseContactConversationsFilters(request));
+  sendSuccess(response, 200, data);
+}
+
+export async function listContactMessages(request: Request, response: Response): Promise<void> {
+  const data = await contactService.listContactMessages(parseContactMessagesFilters(request));
+  sendSuccess(response, 200, data);
 }

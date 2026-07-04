@@ -23,6 +23,13 @@ export interface MessageRecord {
   created_at: string;
 }
 
+export interface MessageStatusUpdateInput {
+  chatJid: string;
+  messageId: string;
+  status: string;
+  timestamp?: string | null;
+}
+
 interface MessageRow {
   workspace_id: string;
   conversation_id: string;
@@ -85,12 +92,46 @@ function getMessageText(message: SyncMessageLike): string | null {
 }
 
 function getMessageType(message: SyncMessageLike): string {
+  const payload = message.message as Record<string, unknown> | undefined;
+
   if (typeof message.message?.conversation === 'string' && message.message.conversation.trim().length > 0) {
     return 'conversation';
   }
 
   if (typeof message.message?.extendedTextMessage?.text === 'string' && message.message.extendedTextMessage.text.trim().length > 0) {
     return 'extendedTextMessage';
+  }
+
+  if (payload?.imageMessage) {
+    return 'imageMessage';
+  }
+
+  if (payload?.videoMessage) {
+    return 'videoMessage';
+  }
+
+  if (payload?.audioMessage || payload?.pttMessage) {
+    return 'voiceMessage';
+  }
+
+  if (payload?.documentMessage) {
+    return 'documentMessage';
+  }
+
+  if (payload?.stickerMessage) {
+    return 'stickerMessage';
+  }
+
+  if (payload?.locationMessage) {
+    return 'locationMessage';
+  }
+
+  if (payload?.contactMessage) {
+    return 'contactMessage';
+  }
+
+  if (payload?.reactionMessage) {
+    return 'reactionMessage';
   }
 
   return 'unknown';
@@ -237,6 +278,69 @@ async function fetchConversations(
 
 export class MessageRepository {
   public constructor(private readonly supabaseClient: SupabaseClient) {}
+
+  public async updateStatuses(
+    context: SyncContext,
+    updates: MessageStatusUpdateInput[]
+  ): Promise<BulkUpsertResult<MessageRecord>> {
+    const repoLogger = createRepoLogger(context);
+    const dedupedUpdates = uniqueStatuses(updates);
+    const chatJids = dedupedUpdates.map((update) => normalizeJid(update.chatJid)).filter((value): value is string => value !== null);
+    const conversations = await fetchConversations(this.supabaseClient, context, chatJids);
+    const now = nowIso();
+    const records: MessageRecord[] = [];
+    let updatedCount = 0;
+
+    for (const update of dedupedUpdates) {
+      const chatJid = normalizeJid(update.chatJid);
+      const conversation = chatJid ? conversations.get(chatJid) : undefined;
+
+      if (!chatJid || !conversation) {
+        continue;
+      }
+
+      const { data, error } = await this.supabaseClient
+        .from(SUPABASE_SYNC_TABLES.messages)
+        .update({
+          status: update.status,
+          updated_at: now
+        })
+        .eq('workspace_id', context.workspaceId)
+        .eq('conversation_id', conversation.id)
+        .eq('message_id', normalizeKey(update.messageId))
+        .select('id,workspace_id,conversation_id,message_id,sender_jid,recipient_jid,direction,message_type,text,media_url,status,timestamp,created_at');
+
+      if (error) {
+        repoLogger.error(
+          {
+            err: error,
+            status: update.status,
+            chatJid,
+            messageId: update.messageId
+          },
+          'MessageRepository Supabase errors'
+        );
+        throw error;
+      }
+
+      const rows = (data ?? []).map((row) => row as MessageRecord);
+      records.push(...rows);
+      updatedCount += rows.length;
+    }
+
+    return {
+      stats: {
+        inputCount: updates.length,
+        validCount: dedupedUpdates.length,
+        duplicateCount: updates.length - dedupedUpdates.length,
+        existingCount: records.length,
+        persistedCount: updatedCount,
+        invalidCount: 0
+      },
+      records,
+      byKey: new Map(records.map((record) => [record.message_id, record]))
+    };
+  }
 
   public async bulkUpsert(
     context: SyncContext,
@@ -439,6 +543,23 @@ export class MessageRepository {
       conversationCreations
     };
   }
+}
+
+function uniqueStatuses(updates: MessageStatusUpdateInput[]): MessageStatusUpdateInput[] {
+  const seen = new Set<string>();
+
+  return updates.filter((update) => {
+    const chatJid = normalizeJid(update.chatJid);
+    const messageId = normalizeKey(update.messageId);
+    const key = chatJid && messageId ? `${chatJid}:${messageId}:${update.status}` : null;
+
+    if (!key || seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 export function createMessageRepository(supabaseClient: SupabaseClient): MessageRepository {

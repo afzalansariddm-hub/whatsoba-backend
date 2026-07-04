@@ -411,7 +411,6 @@ export class SessionManager {
       const messages = normalizeIncomingMessage(update as MessagesUpsertEvent);
 
       for (const message of messages) {
-        emitSocketEvent('message.received', message);
         webhookDispatcher.emit('message.received', toReceivedWebhookMessageEvent(session.connectionId, message));
       }
     });

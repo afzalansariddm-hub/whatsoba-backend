@@ -30,7 +30,19 @@ export interface SendMediaMessageResult {
   mediaUrl: string;
 }
 
-export type IncomingMessageType = 'conversation' | 'extendedTextMessage' | 'unknown';
+export type IncomingMessageType =
+  | 'conversation'
+  | 'extendedTextMessage'
+  | 'imageMessage'
+  | 'videoMessage'
+  | 'audioMessage'
+  | 'voiceMessage'
+  | 'documentMessage'
+  | 'stickerMessage'
+  | 'locationMessage'
+  | 'contactMessage'
+  | 'reactionMessage'
+  | 'unknown';
 
 export interface IncomingMessage {
   id: string;

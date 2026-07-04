@@ -13,7 +13,23 @@ export type WebhookEventName = (typeof WEBHOOK_EVENTS)[number];
 
 export type WebhookMessageDirection = 'inbound' | 'outbound';
 export type WebhookMessageStatus = 'RECEIVED' | 'SENT' | 'DELIVERED' | 'READ';
-export type WebhookMessageType = 'conversation' | 'extendedTextMessage' | 'image' | 'video' | 'audio' | 'document' | 'unknown';
+export type WebhookMessageType =
+  | 'conversation'
+  | 'extendedTextMessage'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'document'
+  | 'imageMessage'
+  | 'videoMessage'
+  | 'audioMessage'
+  | 'voiceMessage'
+  | 'documentMessage'
+  | 'stickerMessage'
+  | 'locationMessage'
+  | 'contactMessage'
+  | 'reactionMessage'
+  | 'unknown';
 
 export interface WebhookMessageEvent {
   connectionId: string;

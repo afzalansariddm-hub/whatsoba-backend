@@ -1,10 +1,12 @@
 import { logger } from '../../config/logger';
 import { getSupabaseClient } from '../../config/supabase';
+import { emitRealtimeSocketEvent } from '../../socket/session-events';
 import { createContactRepository, type ContactRepository } from './repositories/contact-repository';
 import { createConversationRepository, type ConversationRecord, type ConversationRepository, type ConversationWriteResult } from './repositories/conversation-repository';
-import { createMessageRepository, type MessageRepository } from './repositories/message-repository';
+import { createMessageRepository, type MessageRepository, type MessageStatusUpdateInput } from './repositories/message-repository';
 import type { BulkUpsertStats } from './repositories/types';
 import type { HistorySyncEvent, MessagesUpsertEvent, SyncChatLike, SyncContext, SyncContactLike, SyncMessageLike, SyncRuntime, SyncSocketLike } from './types';
+import { normalizeJid } from './repositories/utils';
 
 interface SyncRunStatistics {
   contacts: BulkUpsertStats;
@@ -137,6 +139,102 @@ function summarizeMessageEvent(messages: SyncMessageLike[], type?: string): Reco
     firstMessageId: getFirstMessageId(messages),
     type: type ?? null
   };
+}
+
+function classifyMessageType(message: SyncMessageLike): string {
+  const payload = message.message as Record<string, unknown> | undefined;
+
+  if (typeof message.message?.conversation === 'string' && message.message.conversation.trim().length > 0) {
+    return 'text';
+  }
+
+  if (typeof message.message?.extendedTextMessage?.text === 'string' && message.message.extendedTextMessage.text.trim().length > 0) {
+    return 'text';
+  }
+
+  if (payload?.imageMessage) {
+    return 'image';
+  }
+
+  if (payload?.videoMessage) {
+    return 'video';
+  }
+
+  if (payload?.audioMessage || payload?.pttMessage) {
+    return payload?.pttMessage ? 'voice' : 'audio';
+  }
+
+  if (payload?.documentMessage) {
+    return 'document';
+  }
+
+  if (payload?.stickerMessage) {
+    return 'sticker';
+  }
+
+  if (payload?.locationMessage) {
+    return 'location';
+  }
+
+  if (payload?.contactMessage) {
+    return 'contact';
+  }
+
+  if (payload?.reactionMessage) {
+    return 'reaction';
+  }
+
+  return 'unknown';
+}
+
+function buildRealtimeMessagePayload(
+  context: SyncContext,
+  record: ConversationRecord | undefined,
+  message: SyncMessageLike,
+  status: 'SENDING' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'DELETED' | 'RECEIVED',
+  unreadCount?: number | null
+) {
+  const chatId = message.key?.remoteJid ?? record?.chat_jid ?? '';
+
+  return {
+    connectionId: context.connectionId,
+    messageId: message.key?.id ?? '',
+    conversationId: record?.id ?? null,
+    chatId,
+    direction: message.key?.fromMe ? 'outbound' : 'inbound',
+    type: classifyMessageType(message),
+    text:
+      typeof message.message?.conversation === 'string'
+        ? message.message.conversation
+        : typeof message.message?.extendedTextMessage?.text === 'string'
+          ? message.message.extendedTextMessage.text
+          : null,
+    status,
+    timestamp: message.messageTimestamp ? new Date(message.messageTimestamp * 1000).toISOString() : new Date().toISOString(),
+    unreadCount: unreadCount ?? null
+  } as const;
+}
+
+function buildRealtimeConversationPayload(
+  context: SyncContext,
+  conversationId: string,
+  chatId: string,
+  lastMessage: string | null,
+  lastMessageType: string | null,
+  lastMessageAt: string | null,
+  unreadCount: number,
+  isGroup: boolean
+) {
+  return {
+    connectionId: context.connectionId,
+    conversationId,
+    chatId,
+    lastMessage,
+    lastMessageType,
+    lastMessageAt,
+    unreadCount,
+    isGroup
+  } as const;
 }
 
 function createInitialCounters(): SyncCounters {
@@ -350,6 +448,22 @@ export class SyncService {
       );
       void this.handleMessagesSync(sessionId, messages, 'messages.upsert', payload.type ?? null);
     });
+
+    client.ev.on('messages.update', (event) => {
+      void this.handleMessagesUpdate(sessionId, event as { messages?: SyncMessageLike[] });
+    });
+
+    client.ev.on('messages.delete', (event) => {
+      void this.handleMessagesDelete(sessionId, event as { keys?: Array<{ id?: string; remoteJid?: string; participant?: string }> });
+    });
+
+    client.ev.on('message-receipt.update', (event) => {
+      void this.handleMessageReceipts(sessionId, event as Array<{ key?: { id?: string; remoteJid?: string; participant?: string }; receipt?: { type?: string } }>);
+    });
+
+    client.ev.on('presence.update', (event) => {
+      void this.handlePresenceUpdate(sessionId, event as { id?: string; presences?: Record<string, { lastSeen?: number | null; lastKnownPresence?: string }> });
+    });
   }
 
   private enqueue(sessionId: string, task: () => Promise<void>): void {
@@ -549,6 +663,47 @@ export class SyncService {
       if (messagesResult.stats.inputCount > 0) {
         state.counters.messagesImported += messagesResult.stats.persistedCount;
         state.counters.conversationsCreated += messagesResult.conversationCreations;
+        for (const record of messagesResult.records) {
+          emitRealtimeSocketEvent(
+            record.direction === 'outbound' ? 'message.updated' : 'message.created',
+            {
+              connectionId: state.connectionId,
+              messageId: record.message_id,
+              conversationId: record.conversation_id,
+              chatId: record.recipient_jid ?? '',
+              direction: record.direction,
+              type: record.message_type,
+              text: record.text,
+              status: record.direction === 'outbound' ? 'SENT' : 'RECEIVED',
+              timestamp: record.timestamp,
+              unreadCount: record.direction === 'inbound' ? 1 : 0
+            },
+            `${state.connectionId}:${record.conversation_id}:${record.message_id}:${record.direction}:${record.status}`
+          );
+        }
+
+        for (const summary of messagesResult.conversationSummaries) {
+          const conversation = messagesResult.records.find((record) => normalizeJid(record.recipient_jid) === normalizeJid(summary.chat_jid));
+
+          if (!conversation) {
+            continue;
+          }
+
+          emitRealtimeSocketEvent(
+            summary.unread_count && summary.unread_count > 0 ? 'conversation.unread' : 'conversation.updated',
+            buildRealtimeConversationPayload(
+              state,
+              conversation.conversation_id,
+              summary.chat_jid,
+              summary.last_message,
+              summary.last_message_type,
+              summary.last_message_at,
+              summary.unread_count ?? 0,
+              Boolean(summary.is_group)
+            ),
+            `${state.connectionId}:${conversation.conversation_id}:${summary.chat_jid}:${summary.last_message_at ?? 'none'}`
+          );
+        }
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
@@ -828,6 +983,283 @@ export class SyncService {
             ...summaryResult.stats
           },
           'Conversation summaries synced'
+        );
+      }
+    });
+  }
+
+  private async handleMessagesUpdate(sessionId: string, event: { messages?: SyncMessageLike[] }): Promise<void> {
+    this.enqueueOrBuffer(sessionId, async () => {
+      const state = this.sessions.get(sessionId);
+      const messages = event.messages ?? [];
+
+      if (!state || messages.length === 0) {
+        return;
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'messages.update',
+          rowsReceived: messages.length
+        },
+        'Message update received'
+      );
+
+      const result = await this.runMessageSync(state, messages);
+
+      for (const message of messages) {
+        const messageId = message.key?.id;
+        const record = messageId ? result.records.find((item) => item.message_id === messageId) : undefined;
+
+        if (!messageId) {
+          continue;
+        }
+
+        emitRealtimeSocketEvent(
+          'message.updated',
+          buildRealtimeMessagePayload(state, undefined, message, message.key?.fromMe ? 'SENT' : 'RECEIVED'),
+          `${state.connectionId}:${messageId}:messages.update`
+        );
+
+        if (record) {
+          emitRealtimeSocketEvent(
+            'conversation.updated',
+            buildRealtimeConversationPayload(
+              state,
+              record.conversation_id,
+              message.key?.remoteJid ?? record.recipient_jid ?? '',
+              record.text,
+              record.message_type,
+              record.timestamp,
+              0,
+              Boolean((message.key?.remoteJid ?? record.recipient_jid ?? '').endsWith('@g.us'))
+            ),
+            `${state.connectionId}:${record.conversation_id}:messages.update`
+          );
+        }
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'messages.update',
+          ...result.stats
+        },
+        'Realtime message update emitted'
+      );
+    });
+  }
+
+  private async handleMessagesDelete(sessionId: string, event: { keys?: Array<{ id?: string; remoteJid?: string; participant?: string }> }): Promise<void> {
+    this.enqueueOrBuffer(sessionId, async () => {
+      const state = this.sessions.get(sessionId);
+      const keys = event.keys ?? [];
+
+      if (!state || keys.length === 0 || !this.messageRepository) {
+        return;
+      }
+
+      const updates: MessageStatusUpdateInput[] = keys
+        .map((key) => {
+          const messageId = key.id;
+          const chatJid = key.remoteJid;
+
+          return messageId && chatJid
+            ? {
+                chatJid,
+                messageId,
+                status: 'DELETED'
+              }
+            : null;
+        })
+        .filter((value): value is MessageStatusUpdateInput => value !== null);
+
+      if (updates.length === 0) {
+        return;
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'messages.delete',
+          rowsReceived: updates.length
+        },
+        'Message delete received'
+      );
+
+      const result = await this.messageRepository.updateStatuses(state, updates);
+
+      for (const update of updates) {
+        emitRealtimeSocketEvent(
+          'message.updated',
+          {
+            connectionId: state.connectionId,
+            messageId: update.messageId,
+            conversationId: result.records.find((record) => record.message_id === update.messageId)?.conversation_id ?? null,
+            chatId: update.chatJid,
+            direction: 'inbound',
+            type: 'unknown',
+            text: null,
+            status: 'DELETED',
+            timestamp: update.timestamp ?? new Date().toISOString(),
+            unreadCount: null
+          },
+          `${state.connectionId}:${update.chatJid}:${update.messageId}:messages.delete`
+        );
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'messages.delete',
+          ...result.stats
+        },
+        'Realtime message delete emitted'
+      );
+    });
+  }
+
+  private async handleMessageReceipts(
+    sessionId: string,
+    receipts: Array<{ key?: { id?: string; remoteJid?: string; participant?: string }; receipt?: { type?: string } }>
+  ): Promise<void> {
+    this.enqueueOrBuffer(sessionId, async () => {
+      const state = this.sessions.get(sessionId);
+
+      if (!state || receipts.length === 0 || !this.messageRepository) {
+        return;
+      }
+
+      const updates: MessageStatusUpdateInput[] = receipts
+        .map((receipt) => {
+          const messageId = receipt.key?.id;
+          const chatJid = receipt.key?.remoteJid;
+          const type = receipt.receipt?.type;
+
+          if (!messageId || !chatJid) {
+            return null;
+          }
+
+          const status = type === 'read' || type === 'read-self' ? 'READ' : 'DELIVERED';
+
+          return {
+            chatJid,
+            messageId,
+            status
+          } satisfies MessageStatusUpdateInput;
+        })
+        .filter((value): value is MessageStatusUpdateInput => value !== null);
+
+      if (updates.length === 0) {
+        return;
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'message-receipt.update',
+          rowsReceived: updates.length
+        },
+        'Message receipt received'
+      );
+
+      const result = await this.messageRepository.updateStatuses(state, updates);
+
+      for (const update of updates) {
+        const record = result.records.find((item) => item.message_id === update.messageId);
+        emitRealtimeSocketEvent(
+          'message.updated',
+          {
+            connectionId: state.connectionId,
+            messageId: update.messageId,
+            conversationId: record?.conversation_id ?? null,
+            chatId: update.chatJid,
+            direction: 'outbound',
+            type: 'unknown',
+            text: record?.text ?? null,
+            status: update.status as 'SENDING' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'DELETED' | 'RECEIVED',
+            timestamp: record?.timestamp ?? new Date().toISOString(),
+            unreadCount: null
+          },
+          `${state.connectionId}:${update.chatJid}:${update.messageId}:${update.status}:receipt`
+        );
+
+        if (record) {
+          emitRealtimeSocketEvent(
+            'conversation.updated',
+            buildRealtimeConversationPayload(
+              state,
+              record.conversation_id,
+              update.chatJid,
+              record.text ?? null,
+              record.message_type,
+              record.timestamp,
+              0,
+              update.chatJid.endsWith('@g.us')
+            ),
+            `${state.connectionId}:${update.chatJid}:${record.conversation_id}:${update.status}:conversation`
+          );
+        }
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'message-receipt.update',
+          ...result.stats
+        },
+        'Realtime receipt update emitted'
+      );
+    });
+  }
+
+  private async handlePresenceUpdate(sessionId: string, event: { id?: string; presences?: Record<string, { lastSeen?: number | null; lastKnownPresence?: string }> }): Promise<void> {
+    this.enqueueOrBuffer(sessionId, async () => {
+      const state = this.sessions.get(sessionId);
+
+      if (!state || !event.id) {
+        return;
+      }
+
+      const presences = event.presences ?? {};
+      const keys = Object.keys(presences);
+
+      if (keys.length === 0) {
+        return;
+      }
+
+      this.syncLogger.info(
+        {
+          syncId: state.syncId,
+          sessionId: state.sessionId,
+          source: 'presence.update',
+          chatId: event.id,
+          presenceCount: keys.length
+        },
+        'Presence update received'
+      );
+
+      for (const participant of keys) {
+        const presence = presences[participant];
+
+        emitRealtimeSocketEvent(
+          'presence.updated',
+          {
+            connectionId: state.connectionId,
+            chatId: event.id,
+            participant,
+            status: presence.lastKnownPresence ?? 'unknown',
+            timestamp: new Date().toISOString(),
+            lastSeen: typeof presence.lastSeen === 'number' ? new Date(presence.lastSeen * 1000).toISOString() : null
+          },
+          `${state.connectionId}:${event.id}:${participant}:${presence.lastKnownPresence ?? 'unknown'}`
         );
       }
     });
