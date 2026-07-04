@@ -66,10 +66,10 @@ interface ConversationRow {
 }
 
 type ConversationInsertRow = Omit<ConversationRow, 'unread_count' | 'is_group' | 'is_archived' | 'is_pinned'> & {
-  unread_count: number | null;
-  is_group: boolean | null;
-  is_archived: boolean | null;
-  is_pinned: boolean | null;
+  unread_count?: number | null;
+  is_group?: boolean | null;
+  is_archived?: boolean | null;
+  is_pinned?: boolean | null;
 };
 
 type ConversationSnapshot = Pick<
@@ -86,6 +86,20 @@ type ConversationSnapshot = Pick<
   | 'is_pinned'
   | 'created_at'
 >;
+
+type ConversationSnapshotRow = {
+  id: string;
+  chat_jid: string;
+  contact_id: string | null;
+  last_message: string | null;
+  last_message_type: string | null;
+  last_message_at: string | null;
+  unread_count: number | null;
+  is_group: boolean | null;
+  is_archived: boolean | null;
+  is_pinned: boolean | null;
+  created_at: string;
+};
 
 function toIsoDate(value: unknown): string | null {
   if (typeof value === 'string' && value.trim().length > 0) {
@@ -147,41 +161,65 @@ export function ensureConversationRowDefaults(
   now: string = nowIso()
 ): { row: ConversationRow; defaultedFields: string[] } {
   const defaultedFields: string[] = [];
-  const normalized: ConversationRow = { ...row };
+  const normalized: ConversationRow = {
+    workspace_id: row.workspace_id,
+    connection_id: row.connection_id,
+    chat_jid: row.chat_jid,
+    contact_id: row.contact_id ?? null,
+    last_message: row.last_message ?? null,
+    last_message_type: row.last_message_type ?? null,
+    last_message_at: row.last_message_at ?? null,
+    unread_count: row.unread_count ?? 0,
+    is_group: row.is_group ?? false,
+    is_archived: row.is_archived ?? false,
+    is_pinned: row.is_pinned ?? false,
+    created_at: row.created_at || now,
+    updated_at: row.updated_at || now
+  };
 
-  if (normalized.unread_count === null || normalized.unread_count === undefined) {
-    normalized.unread_count = 0;
+  if (row.unread_count === null || row.unread_count === undefined) {
     defaultedFields.push('unread_count');
   }
 
-  if (normalized.is_group === null || normalized.is_group === undefined) {
-    normalized.is_group = false;
+  if (row.is_group === null || row.is_group === undefined) {
     defaultedFields.push('is_group');
   }
 
-  if (normalized.is_archived === null || normalized.is_archived === undefined) {
-    normalized.is_archived = false;
+  if (row.is_archived === null || row.is_archived === undefined) {
     defaultedFields.push('is_archived');
   }
 
-  if (normalized.is_pinned === null || normalized.is_pinned === undefined) {
-    normalized.is_pinned = false;
+  if (row.is_pinned === null || row.is_pinned === undefined) {
     defaultedFields.push('is_pinned');
   }
 
-  if (!normalized.created_at) {
-    normalized.created_at = now;
+  if (!row.created_at) {
     defaultedFields.push('created_at');
   }
 
-  if (!normalized.updated_at) {
-    normalized.updated_at = now;
+  if (!row.updated_at) {
     defaultedFields.push('updated_at');
   }
 
   return {
     row: normalized,
     defaultedFields
+  };
+}
+
+function ensureConversationSnapshotDefaults(row: ConversationSnapshotRow, now: string = nowIso()): ConversationSnapshot {
+  return {
+    id: row.id,
+    chat_jid: row.chat_jid,
+    contact_id: row.contact_id,
+    last_message: row.last_message,
+    last_message_type: row.last_message_type,
+    last_message_at: row.last_message_at,
+    unread_count: row.unread_count ?? 0,
+    is_group: row.is_group ?? false,
+    is_archived: row.is_archived ?? false,
+    is_pinned: row.is_pinned ?? false,
+    created_at: row.created_at || now
   };
 }
 
@@ -283,7 +321,7 @@ async function fetchExistingConversationSnapshots(
         return [];
       }
 
-      const snapshot: ConversationSnapshot = {
+      const snapshotRow: ConversationSnapshotRow = {
         id: String((row as { id?: string | number }).id),
         chat_jid: chatJid,
         contact_id: (row as { contact_id?: string | null }).contact_id ?? null,
@@ -297,7 +335,7 @@ async function fetchExistingConversationSnapshots(
         created_at: String((row as { created_at?: string }).created_at ?? nowIso())
       };
 
-      return [[chatJid, snapshot]];
+      return [[chatJid, ensureConversationSnapshotDefaults(snapshotRow)]];
     })
   );
 }
@@ -527,17 +565,17 @@ export class ConversationRepository {
     );
     const now = nowIso();
 
-    const rows = dedupedSummaries
-      .map((summary) => {
-        const chatJid = normalizeJid(summary.chat_jid);
+    const rows: ConversationInsertRow[] = dedupedSummaries.flatMap((summary) => {
+      const chatJid = normalizeJid(summary.chat_jid);
 
-        if (!chatJid) {
-          return null;
-        }
+      if (!chatJid) {
+        return [];
+      }
 
-        const existing = existingSnapshots.get(chatJid);
+      const existing = existingSnapshots.get(chatJid);
 
-        return {
+      return [
+        {
           workspace_id: context.workspaceId,
           connection_id: context.connectionId,
           chat_jid: chatJid,
@@ -551,9 +589,9 @@ export class ConversationRepository {
           is_pinned: summary.is_pinned ?? existing?.is_pinned ?? false,
           created_at: existing?.created_at ?? now,
           updated_at: now
-        } satisfies ConversationInsertRow;
-      })
-      .filter((row): row is ConversationInsertRow => row !== null);
+        } satisfies ConversationInsertRow
+      ];
+    });
     const normalizedRows = rows.map((row) => ensureConversationRowDefaults(row, now));
     const rowsFixed = normalizedRows.filter(({ defaultedFields }) => defaultedFields.length > 0).length;
     const fieldsDefaulted = Array.from(new Set(normalizedRows.flatMap(({ defaultedFields }) => defaultedFields)));
