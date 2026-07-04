@@ -9,6 +9,7 @@ import { errorHandler } from './middleware/error-handler';
 import { notFound } from './middleware/not-found';
 import { requestLogger } from './middleware/request-logger';
 import { apiRouter } from './routes';
+import { v1Router } from './routes/v1.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -27,6 +28,7 @@ export function createApp(): Express {
   app.use(requestLogger);
   app.use(MEDIA_ROUTE_PREFIX, express.static(MEDIA_DIRECTORY));
 
+  app.use('/v1', v1Router);
   app.use('/api', apiRouter);
 
   app.use(notFound);
