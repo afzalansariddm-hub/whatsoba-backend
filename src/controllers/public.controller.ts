@@ -1,6 +1,5 @@
 import type { Request, Response } from 'express';
 
-import { parseApiContext } from '../services/api/query';
 import { messageService } from '../services/message.service';
 import { apiKeyService } from '../services/public/api-key-service';
 import { sessionManager } from '../sessions';
@@ -19,6 +18,20 @@ function normalizePhoneToJid(phone: string): string {
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readWorkspaceIdFromRequest(request: Request): string {
+  const body = request.body as Record<string, unknown> | undefined;
+  const workspaceId =
+    readString(body?.workspaceId) ??
+    readString(body?.workspace_id) ??
+    readString(request.query.workspaceId);
+
+  if (!workspaceId) {
+    throw new AppError('workspaceId is required', 400);
+  }
+
+  return workspaceId;
 }
 
 function toStatusCode(error: unknown): number {
@@ -43,7 +56,7 @@ function toErrorMessage(error: unknown): string {
 
 export async function createApiKey(request: Request, response: Response): Promise<void> {
   try {
-    const { workspaceId } = parseApiContext(request);
+    const workspaceId = readWorkspaceIdFromRequest(request);
     const name = readString(request.body?.name);
     const createdBy = readString(request.body?.createdBy) ?? readString(request.header('x-user-id'));
 
