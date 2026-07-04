@@ -41,11 +41,19 @@ function parseSessionPath(nodeEnv: string | undefined, value: string | undefined
   return nodeEnv === 'production' ? '/data/sessions' : './sessions';
 }
 
+function parseOptional(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
 const nodeEnv = parseNodeEnv(process.env.NODE_ENV);
 const logLevel = process.env.LOG_LEVEL ?? 'info';
 const port = parsePort(process.env.PORT);
 const frontendOrigins = parseCorsOrigins(process.env.FRONTEND_URL);
 const sessionPath = parseSessionPath(nodeEnv, process.env.SESSION_PATH);
+const supabaseUrl = parseOptional(process.env.SUPABASE_URL);
+const supabaseServiceRoleKey = parseOptional(process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 export const env = {
   port,
@@ -53,5 +61,8 @@ export const env = {
   frontendOrigins,
   sessionPath,
   logLevel,
-  isProduction: nodeEnv === 'production'
+  isProduction: nodeEnv === 'production',
+  supabaseUrl,
+  supabaseServiceRoleKey,
+  isSupabaseConfigured: Boolean(supabaseUrl && supabaseServiceRoleKey)
 } as const;

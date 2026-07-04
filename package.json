@@ -12,6 +12,7 @@
     "lint": "eslint . --ext .ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.0",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
     "compression": "^1.8.1",
     "cors": "^2.8.6",

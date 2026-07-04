@@ -12,6 +12,7 @@ import { webhookDispatcher } from '../webhooks';
 import { normalizeIncomingMessage } from '../utils/message-normalizer';
 import { toReceiptWebhookMessageEvent, toReceivedWebhookMessageEvent } from '../utils/webhook-message-event';
 import { toSessionView } from '../utils/session-view';
+import { syncService } from '../services/sync';
 
 type BaileysModule = {
   default: (config: unknown) => BaileysSocket;
@@ -272,10 +273,20 @@ export class SessionManager {
         printQRInTerminal: false,
         browser: ['Whatsoba Gateway', 'Chrome', '1.0.0'],
         logger: logger.child({ module: 'baileys', sessionId }),
-        syncFullHistory: false
+        syncFullHistory: true
       }) as BaileysSocket;
 
       runtime.client = socket;
+      syncService.registerSession(
+        {
+          sessionId,
+          workspaceId: session.workspaceId,
+          connectionId: session.connectionId,
+          phone: session.phone ?? null,
+          displayName: session.displayName ?? null
+        },
+        socket
+      );
       this.bindSocket(sessionId, token, socket, saveCreds, DisconnectReason.loggedOut);
 
       this.patchSession(sessionId, {
@@ -338,11 +349,18 @@ export class SessionManager {
       }
 
       if (connection === 'open') {
+        const phone = toPhoneNumber(socket.user?.id) ?? this.sessions.get(sessionId)?.phone ?? null;
+        const displayName = socket.user?.name ?? this.sessions.get(sessionId)?.displayName ?? null;
+
         this.patchSession(sessionId, {
           status: SESSION_STATUS.CONNECTED,
           qr: null,
-          phone: toPhoneNumber(socket.user?.id) ?? this.sessions.get(sessionId)?.phone ?? null,
-          displayName: socket.user?.name ?? this.sessions.get(sessionId)?.displayName ?? null
+          phone,
+          displayName
+        });
+        syncService.updateContext(sessionId, {
+          phone,
+          displayName
         });
         emitSocketEvent('session.connected', {
           id: sessionId,
@@ -350,6 +368,7 @@ export class SessionManager {
           connectionState: SESSION_STATUS.CONNECTED
         });
         webhookDispatcher.emit('session.connected', toSessionView(session));
+        syncService.markConnected(sessionId);
         return;
       }
 
@@ -370,6 +389,7 @@ export class SessionManager {
           connectionState: SESSION_STATUS.DISCONNECTED
         });
         webhookDispatcher.emit('session.disconnected', toSessionView(session));
+        syncService.markDisconnected(sessionId);
         return;
       }
 
@@ -383,6 +403,7 @@ export class SessionManager {
         connectionState: SESSION_STATUS.DISCONNECTED
       });
       webhookDispatcher.emit('session.disconnected', toSessionView(session));
+      syncService.markDisconnected(sessionId);
       this.scheduleReconnect(sessionId, token);
     });
 
@@ -486,6 +507,7 @@ export class SessionManager {
       }
 
       this.runtimes.delete(sessionId);
+      syncService.removeSession(sessionId);
     }
   }
 
