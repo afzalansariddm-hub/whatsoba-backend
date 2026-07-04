@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import { logger } from '../../../config/logger';
 import { SUPABASE_SYNC_TABLES } from '../../../config/supabase';
 import type { SyncChatLike, SyncContext } from '../types';
 import type { BulkUpsertResult } from './types';
@@ -165,6 +166,16 @@ function toConversationRow(
   };
 }
 
+function createRepoLogger(context: SyncContext) {
+  return logger.child({
+    module: 'conversation-repository',
+    syncId: context.syncId ?? 'unknown',
+    sessionId: context.sessionId,
+    workspaceId: context.workspaceId,
+    connectionId: context.connectionId
+  });
+}
+
 async function fetchExistingConversations(
   supabase: SupabaseClient,
   context: SyncContext,
@@ -316,6 +327,8 @@ function upsertConversationRows(
     }
 
     const records = (data ?? []).map((row) => row as ConversationRecord);
+    const updatedCount = Math.min(existingByChatJid.size, rows.length);
+    const createdCount = Math.max(rows.length - updatedCount, 0);
 
     return {
       stats: {
@@ -325,8 +338,8 @@ function upsertConversationRows(
         existingCount: existingByChatJid.size,
         persistedCount: records.length,
         invalidCount: 0,
-        createdCount: Math.max(rows.length - existingByChatJid.size, 0),
-        updatedCount: existingByChatJid.size
+        createdCount,
+        updatedCount
       },
       records,
       byKey: new Map(records.map((record) => [normalizeJid(record.chat_jid) ?? record.chat_jid, record]))
@@ -358,6 +371,7 @@ export class ConversationRepository {
     chats: SyncChatLike[],
     contactIdByJid: Map<string, string> = new Map()
   ): Promise<ConversationWriteResult> {
+    const repoLogger = createRepoLogger(context);
     const { records: dedupedChats, duplicateCount } = dedupeByKey(chats, (chat) => normalizeJid(chat.jid ?? chat.id));
     const now = nowIso();
     const chatJids = dedupedChats
@@ -386,7 +400,44 @@ export class ConversationRepository {
       context,
       rows.map((row) => row.chat_jid)
     );
-    const result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+
+    repoLogger.info(
+      {
+        rowsReceived: chats.length,
+        rowsDeduped: dedupedChats.length,
+        rowsValid: rows.length,
+        rowsSkipped: duplicateCount + invalidCount,
+        rowsExisting: existingByChatJid.size
+      },
+      'ConversationRepository rows received'
+    );
+
+    let result: ConversationWriteResult;
+
+    try {
+      result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+    } catch (error) {
+      repoLogger.error(
+        {
+          err: error,
+          rowsReceived: chats.length,
+          rowsValid: rows.length,
+          rowsSkipped: duplicateCount + invalidCount
+        },
+        'ConversationRepository Supabase errors'
+      );
+      throw error;
+    }
+
+    repoLogger.info(
+      {
+        rowsInserted: result.stats.createdCount,
+        rowsUpdated: result.stats.updatedCount,
+        rowsSkipped: duplicateCount + invalidCount,
+        persistedCount: result.stats.persistedCount
+      },
+      'ConversationRepository Supabase result'
+    );
 
     return {
       stats: {
@@ -408,6 +459,7 @@ export class ConversationRepository {
     context: SyncContext,
     summaries: ConversationSummaryInput[]
   ): Promise<ConversationWriteResult> {
+    const repoLogger = createRepoLogger(context);
     const { records: dedupedSummaries, duplicateCount } = dedupeByKey(summaries, (summary) => normalizeJid(summary.chat_jid));
     const chatJids = dedupedSummaries.map((summary) => normalizeJid(summary.chat_jid)).filter((value): value is string => value !== null);
     const existingSnapshots = await fetchExistingConversationSnapshots(this.supabaseClient, context, chatJids);
@@ -445,6 +497,17 @@ export class ConversationRepository {
       .filter((row): row is ConversationRow => row !== null);
 
     if (rows.length === 0) {
+      repoLogger.info(
+        {
+          rowsReceived: summaries.length,
+          rowsValid: 0,
+          rowsInserted: 0,
+          rowsUpdated: 0,
+          rowsSkipped: duplicateCount + dedupedSummaries.length,
+          persistedCount: 0
+        },
+        'ConversationRepository rows received'
+      );
       return {
         stats: {
           inputCount: summaries.length,
@@ -461,7 +524,43 @@ export class ConversationRepository {
       };
     }
 
-    const result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+    repoLogger.info(
+      {
+        rowsReceived: summaries.length,
+        rowsDeduped: dedupedSummaries.length,
+        rowsValid: rows.length,
+        rowsSkipped: duplicateCount + (dedupedSummaries.length - rows.length),
+        rowsExisting: existingByChatJid.size
+      },
+      'ConversationRepository rows received'
+    );
+
+    let result: ConversationWriteResult;
+
+    try {
+      result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+    } catch (error) {
+      repoLogger.error(
+        {
+          err: error,
+          rowsReceived: summaries.length,
+          rowsValid: rows.length,
+          rowsSkipped: duplicateCount + (dedupedSummaries.length - rows.length)
+        },
+        'ConversationRepository Supabase errors'
+      );
+      throw error;
+    }
+
+    repoLogger.info(
+      {
+        rowsInserted: result.stats.createdCount,
+        rowsUpdated: result.stats.updatedCount,
+        rowsSkipped: duplicateCount + (dedupedSummaries.length - rows.length),
+        persistedCount: result.stats.persistedCount
+      },
+      'ConversationRepository Supabase result'
+    );
 
     return {
       stats: {

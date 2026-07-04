@@ -2,6 +2,7 @@ export interface SyncContext {
   sessionId: string;
   workspaceId: string;
   connectionId: string;
+  syncId?: string;
   phone?: string | null;
   displayName?: string | null;
 }
@@ -19,6 +20,11 @@ export interface HistorySyncEvent {
   isLatest?: boolean;
   progress?: number;
   syncType?: string;
+}
+
+export interface MessagesUpsertEvent {
+  messages?: SyncMessageLike[];
+  type?: string;
 }
 
 export interface SyncContactLike {

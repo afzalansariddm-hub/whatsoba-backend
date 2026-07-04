@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import { logger } from '../../../config/logger';
 import { SUPABASE_SYNC_TABLES } from '../../../config/supabase';
 import type { SyncContext, SyncMessageLike } from '../types';
 import type { ConversationRecord, ConversationSummaryInput } from './conversation-repository';
@@ -39,6 +40,20 @@ interface MessageRow {
 
 function now(): string {
   return nowIso();
+}
+
+function createRepoLogger(context: SyncContext) {
+  return logger.child({
+    module: 'message-repository',
+    syncId: context.syncId ?? 'unknown',
+    sessionId: context.sessionId,
+    workspaceId: context.workspaceId,
+    connectionId: context.connectionId
+  });
+}
+
+function buildMessageKey(conversationId: string, messageId: string): string {
+  return `${conversationId}:${messageId}`;
 }
 
 function getMessageId(message: SyncMessageLike): string | null {
@@ -155,17 +170,20 @@ function toMessageRow(
 async function fetchExistingMessages(
   supabase: SupabaseClient,
   context: SyncContext,
-  messageIds: string[]
+  rows: Array<Pick<MessageRow, 'conversation_id' | 'message_id'>>
 ): Promise<Map<string, { created_at: string }>> {
-  if (messageIds.length === 0) {
+  if (rows.length === 0) {
     return new Map();
   }
 
+  const conversationIds = Array.from(new Set(rows.map((row) => row.conversation_id)));
+  const messageIds = Array.from(new Set(rows.map((row) => row.message_id)));
+  const expectedKeys = new Set(rows.map((row) => buildMessageKey(row.conversation_id, row.message_id)));
   const { data, error } = await supabase
     .from(SUPABASE_SYNC_TABLES.messages)
-    .select('message_id,created_at')
+    .select('conversation_id,message_id,created_at')
     .eq('workspace_id', context.workspaceId)
-    .eq('connection_id', context.connectionId)
+    .in('conversation_id', conversationIds)
     .in('message_id', messageIds);
 
   if (error) {
@@ -174,9 +192,15 @@ async function fetchExistingMessages(
 
   return new Map(
     (data ?? []).flatMap((row) => {
+      const conversationId = String((row as { conversation_id?: string | null }).conversation_id ?? '');
       const messageId = normalizeKey((row as { message_id?: string | null }).message_id);
+      const key = conversationId && messageId ? buildMessageKey(conversationId, messageId) : null;
 
-      return messageId ? [[messageId, { created_at: String((row as { created_at?: string }).created_at ?? now()) }]] : [];
+      if (!key || !expectedKeys.has(key)) {
+        return [];
+      }
+
+      return [[key, { created_at: String((row as { created_at?: string }).created_at ?? now()) }]];
     })
   );
 }
@@ -219,6 +243,7 @@ export class MessageRepository {
     messages: SyncMessageLike[],
     conversationByChatJid: Map<string, ConversationRecord> = new Map()
   ): Promise<BulkUpsertResult<MessageRecord> & { conversationSummaries: ConversationSummaryInput[]; conversationCreations: number }> {
+    const repoLogger = createRepoLogger(context);
     const { records: dedupedMessages, duplicateCount } = dedupeByKey(messages, (message) => {
       const messageId = normalizeKey(message.key?.id);
       const chatJid = normalizeJid(message.key?.remoteJid);
@@ -286,17 +311,39 @@ export class MessageRepository {
       })
       .filter((row): row is MessageRow => row !== null);
     const invalidCount = dedupedMessages.length - rows.length;
-    const existingByMessageId = await fetchExistingMessages(
-      this.supabaseClient,
-      context,
-      rows.map((row) => row.message_id)
+    const existingByMessageId = await fetchExistingMessages(this.supabaseClient, context, rows);
+    const rowsSkipped = duplicateCount + invalidCount;
+
+    repoLogger.info(
+      {
+        rowsReceived: messages.length,
+        rowsDeduped: dedupedMessages.length,
+        rowsValid: rows.length,
+        rowsSkipped,
+        rowsExisting: existingByMessageId.size,
+        placeholderConversationCreated: conversationCreations > 0,
+        conversationCreations
+      },
+      'MessageRepository rows received'
     );
+
     const payload = rows.map((row) => ({
       ...row,
-      created_at: existingByMessageId.get(row.message_id)?.created_at ?? row.created_at
+      created_at: existingByMessageId.get(buildMessageKey(row.conversation_id, row.message_id))?.created_at ?? row.created_at
     }));
 
     if (payload.length === 0) {
+      repoLogger.info(
+        {
+          rowsInserted: 0,
+          rowsUpdated: 0,
+          rowsSkipped,
+          persistedCount: 0,
+          placeholderConversationCreated: conversationCreations > 0,
+          conversationCreations
+        },
+        'MessageRepository Supabase result'
+      );
       return {
         stats: {
           inputCount: messages.length,
@@ -316,15 +363,40 @@ export class MessageRepository {
     const { data, error } = await this.supabaseClient
       .from(SUPABASE_SYNC_TABLES.messages)
       .upsert(payload, {
-        onConflict: 'workspace_id,connection_id,message_id'
+        onConflict: 'workspace_id,conversation_id,message_id'
       })
       .select('id,workspace_id,conversation_id,message_id,sender_jid,recipient_jid,direction,message_type,text,media_url,status,timestamp,created_at');
 
     if (error) {
+      repoLogger.error(
+        {
+          err: error,
+          rowsReceived: messages.length,
+          rowsValid: rows.length,
+          rowsSkipped,
+          placeholderConversationCreated: conversationCreations > 0,
+          conversationCreations
+        },
+        'MessageRepository Supabase errors'
+      );
       throw error;
     }
 
     const records = (data ?? []).map((row) => row as MessageRecord);
+    const existingCount = existingByMessageId.size;
+    const insertedCount = Math.max(rows.length - existingCount, 0);
+    const updatedCount = Math.min(existingCount, rows.length);
+    repoLogger.info(
+      {
+        rowsInserted: insertedCount,
+        rowsUpdated: updatedCount,
+        rowsSkipped,
+        persistedCount: records.length,
+        placeholderConversationCreated: conversationCreations > 0,
+        conversationCreations
+      },
+      'MessageRepository Supabase result'
+    );
     const latestByConversation = new Map<string, MessageRecord>();
 
     for (const record of records) {
@@ -356,7 +428,7 @@ export class MessageRepository {
         inputCount: messages.length,
         validCount: rows.length,
         duplicateCount,
-        existingCount: existingByMessageId.size,
+        existingCount,
         persistedCount: records.length,
         invalidCount
       },
