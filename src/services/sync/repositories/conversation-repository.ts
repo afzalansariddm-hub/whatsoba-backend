@@ -33,6 +33,21 @@ export interface ConversationSummaryInput {
   is_pinned?: boolean | null;
 }
 
+export interface ConversationWriteStats {
+  inputCount: number;
+  validCount: number;
+  duplicateCount: number;
+  existingCount: number;
+  persistedCount: number;
+  invalidCount: number;
+  createdCount: number;
+  updatedCount: number;
+}
+
+export interface ConversationWriteResult extends Omit<BulkUpsertResult<ConversationRecord>, 'stats'> {
+  stats: ConversationWriteStats;
+}
+
 interface ConversationRow {
   workspace_id: string;
   connection_id: string;
@@ -259,7 +274,7 @@ function upsertConversationRows(
   supabase: SupabaseClient,
   rows: ConversationRow[],
   existingByChatJid: Map<string, { id: string; created_at: string }>
-): Promise<BulkUpsertResult<ConversationRecord>> {
+): Promise<ConversationWriteResult> {
   if (rows.length === 0) {
     return Promise.resolve({
       stats: {
@@ -268,7 +283,9 @@ function upsertConversationRows(
         duplicateCount: 0,
         existingCount: existingByChatJid.size,
         persistedCount: 0,
-        invalidCount: 0
+        invalidCount: 0,
+        createdCount: 0,
+        updatedCount: 0
       },
       records: [],
       byKey: new Map()
@@ -307,7 +324,9 @@ function upsertConversationRows(
         duplicateCount: 0,
         existingCount: existingByChatJid.size,
         persistedCount: records.length,
-        invalidCount: 0
+        invalidCount: 0,
+        createdCount: Math.max(rows.length - existingByChatJid.size, 0),
+        updatedCount: existingByChatJid.size
       },
       records,
       byKey: new Map(records.map((record) => [normalizeJid(record.chat_jid) ?? record.chat_jid, record]))
@@ -318,11 +337,27 @@ function upsertConversationRows(
 export class ConversationRepository {
   public constructor(private readonly supabaseClient: SupabaseClient) {}
 
+  public async countByScope(workspaceId: string, connectionId?: string): Promise<number> {
+    const query = this.supabaseClient
+      .from(SUPABASE_SYNC_TABLES.conversations)
+      .select('id', { count: 'exact', head: true })
+      .eq('workspace_id', workspaceId);
+
+    const scopedQuery = connectionId ? query.eq('connection_id', connectionId) : query;
+    const { count, error } = await scopedQuery;
+
+    if (error) {
+      throw error;
+    }
+
+    return count ?? 0;
+  }
+
   public async bulkUpsert(
     context: SyncContext,
     chats: SyncChatLike[],
     contactIdByJid: Map<string, string> = new Map()
-  ): Promise<BulkUpsertResult<ConversationRecord>> {
+  ): Promise<ConversationWriteResult> {
     const { records: dedupedChats, duplicateCount } = dedupeByKey(chats, (chat) => normalizeJid(chat.jid ?? chat.id));
     const now = nowIso();
     const chatJids = dedupedChats
@@ -360,7 +395,9 @@ export class ConversationRepository {
         duplicateCount,
         existingCount: existingByChatJid.size,
         persistedCount: result.records.length,
-        invalidCount
+        invalidCount,
+        createdCount: result.stats.createdCount,
+        updatedCount: result.stats.updatedCount
       },
       records: result.records,
       byKey: result.byKey
@@ -370,7 +407,7 @@ export class ConversationRepository {
   public async bulkUpsertSummaries(
     context: SyncContext,
     summaries: ConversationSummaryInput[]
-  ): Promise<BulkUpsertResult<ConversationRecord>> {
+  ): Promise<ConversationWriteResult> {
     const { records: dedupedSummaries, duplicateCount } = dedupeByKey(summaries, (summary) => normalizeJid(summary.chat_jid));
     const chatJids = dedupedSummaries.map((summary) => normalizeJid(summary.chat_jid)).filter((value): value is string => value !== null);
     const existingSnapshots = await fetchExistingConversationSnapshots(this.supabaseClient, context, chatJids);
@@ -415,7 +452,9 @@ export class ConversationRepository {
           duplicateCount,
           existingCount: existingSnapshots.size,
           persistedCount: 0,
-          invalidCount: dedupedSummaries.length
+          invalidCount: dedupedSummaries.length,
+          createdCount: 0,
+          updatedCount: 0
         },
         records: [],
         byKey: new Map()
@@ -431,7 +470,9 @@ export class ConversationRepository {
         duplicateCount,
         existingCount: existingByChatJid.size,
         persistedCount: result.records.length,
-        invalidCount: dedupedSummaries.length - rows.length
+        invalidCount: dedupedSummaries.length - rows.length,
+        createdCount: result.stats.createdCount,
+        updatedCount: result.stats.updatedCount
       },
       records: result.records,
       byKey: result.byKey

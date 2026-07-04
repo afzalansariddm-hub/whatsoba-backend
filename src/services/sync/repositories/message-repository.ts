@@ -218,7 +218,7 @@ export class MessageRepository {
     context: SyncContext,
     messages: SyncMessageLike[],
     conversationByChatJid: Map<string, ConversationRecord> = new Map()
-  ): Promise<BulkUpsertResult<MessageRecord> & { conversationSummaries: ConversationSummaryInput[] }> {
+  ): Promise<BulkUpsertResult<MessageRecord> & { conversationSummaries: ConversationSummaryInput[]; conversationCreations: number }> {
     const { records: dedupedMessages, duplicateCount } = dedupeByKey(messages, (message) => {
       const messageId = normalizeKey(message.key?.id);
       const chatJid = normalizeJid(message.key?.remoteJid);
@@ -240,6 +240,7 @@ export class MessageRepository {
       ...Array.from(fetchedConversations.entries())
     ]);
     const unresolvedChatJids = chatJids.filter((jid) => !resolvedConversations.has(jid));
+    let conversationCreations = 0;
 
     if (unresolvedChatJids.length > 0) {
       const now = nowIso();
@@ -272,6 +273,8 @@ export class MessageRepository {
       for (const [chatJid, conversation] of createdConversations.entries()) {
         resolvedConversations.set(chatJid, conversation);
       }
+
+      conversationCreations = unresolvedChatJids.length;
     }
 
     const rows = dedupedMessages
@@ -305,7 +308,8 @@ export class MessageRepository {
         },
         records: [],
         byKey: new Map(),
-        conversationSummaries: []
+        conversationSummaries: [],
+        conversationCreations
       };
     }
 
@@ -358,7 +362,8 @@ export class MessageRepository {
       },
       records,
       byKey: new Map(records.map((record) => [record.message_id, record])),
-      conversationSummaries
+      conversationSummaries,
+      conversationCreations
     };
   }
 }

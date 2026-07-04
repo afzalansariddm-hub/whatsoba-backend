@@ -5,22 +5,19 @@ import { SUPABASE_SYNC_TABLES } from '../../config/supabase';
 import type { SyncChatLike, SyncContext } from './types';
 
 interface ChatRow {
-  session_id: string;
   workspace_id: string;
   connection_id: string;
-  chat_id: string;
-  jid: string;
-  name: string | null;
-  subject: string | null;
+  chat_jid: string;
+  contact_id: string | null;
+  last_message: string | null;
+  last_message_type: string | null;
+  last_message_at: string | null;
   unread_count: number | null;
-  archived: boolean | null;
-  pinned: boolean | null;
-  read_only: boolean | null;
   is_group: boolean | null;
-  mute_end_time: number | null;
-  conversation_timestamp: string | null;
-  metadata: Record<string, unknown>;
-  synced_at: string;
+  is_archived: boolean | null;
+  is_pinned: boolean | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface SyncResult {
@@ -59,31 +56,41 @@ function toChatRow(context: SyncContext, chat: SyncChatLike): ChatRow | null {
     return null;
   }
 
-  const metadata = { ...chat };
+  const lastMessage = typeof chat.lastMessage === 'object' && chat.lastMessage !== null ? (chat.lastMessage as { conversation?: string; extendedTextMessage?: { text?: string }; messageTimestamp?: number | null }) : null;
+  const lastMessageText =
+    typeof lastMessage?.conversation === 'string'
+      ? lastMessage.conversation
+      : typeof lastMessage?.extendedTextMessage?.text === 'string'
+        ? lastMessage.extendedTextMessage.text
+        : null;
+  const lastMessageAt = lastMessage?.messageTimestamp ? new Date(lastMessage.messageTimestamp * 1000).toISOString() : null;
+  const currentTime = now();
 
   return {
-    session_id: context.sessionId,
     workspace_id: context.workspaceId,
     connection_id: context.connectionId,
-    chat_id: chatId,
-    jid: chatId,
-    name: chat.name ?? chat.subject ?? null,
-    subject: chat.subject ?? null,
+    chat_jid: chatId,
+    contact_id: null,
+    last_message: lastMessageText,
+    last_message_type:
+      typeof lastMessage?.conversation === 'string'
+        ? 'conversation'
+        : typeof lastMessage?.extendedTextMessage?.text === 'string'
+          ? 'extendedTextMessage'
+          : null,
+    last_message_at: lastMessageAt,
     unread_count: typeof chat.unreadCount === 'number' ? chat.unreadCount : null,
-    archived: typeof chat.archived === 'boolean' ? chat.archived : null,
-    pinned: typeof chat.pinned === 'boolean' ? chat.pinned : chat.pinned === undefined ? null : Boolean(chat.pinned),
-    read_only: typeof chat.readOnly === 'boolean' ? chat.readOnly : null,
     is_group: typeof chat.isGroup === 'boolean' ? chat.isGroup : null,
-    mute_end_time: typeof chat.muteEndTime === 'number' ? chat.muteEndTime : null,
-    conversation_timestamp: normalizeTimestamp(chat.conversationTimestamp ?? null),
-    metadata,
-    synced_at: now()
+    is_archived: typeof chat.archived === 'boolean' ? chat.archived : null,
+    is_pinned: typeof chat.pinned === 'boolean' ? chat.pinned : chat.pinned === undefined ? null : Boolean(chat.pinned),
+    created_at: currentTime,
+    updated_at: currentTime
   };
 }
 
 async function upsertChat(supabase: SupabaseClient, row: ChatRow): Promise<void> {
   const { error } = await supabase.from(SUPABASE_SYNC_TABLES.conversations).upsert(row, {
-    onConflict: 'session_id,chat_id'
+    onConflict: 'workspace_id,connection_id,chat_jid'
   });
 
   if (error) {
@@ -115,7 +122,7 @@ export async function syncChats(
       logger.warn(
         {
           sessionId: context.sessionId,
-          chatId: row.chat_id,
+          chatId: row.chat_jid,
           err: error
         },
         'chat sync failed'

@@ -1,7 +1,7 @@
 import { logger } from '../../config/logger';
 import { getSupabaseClient } from '../../config/supabase';
 import { createContactRepository, type ContactRepository } from './repositories/contact-repository';
-import { createConversationRepository, type ConversationRecord, type ConversationRepository } from './repositories/conversation-repository';
+import { createConversationRepository, type ConversationRecord, type ConversationRepository, type ConversationWriteResult } from './repositories/conversation-repository';
 import { createMessageRepository, type MessageRepository } from './repositories/message-repository';
 import type { BulkUpsertStats } from './repositories/types';
 import type { HistorySyncEvent, SyncChatLike, SyncContext, SyncContactLike, SyncMessageLike, SyncRuntime, SyncSocketLike } from './types';
@@ -11,6 +11,13 @@ interface SyncRunStatistics {
   conversations: BulkUpsertStats;
   messages: BulkUpsertStats;
   conversationSummaries: BulkUpsertStats;
+  historyChats: number;
+  chatsUpserted: number;
+  messagesImported: number;
+  contactsImported: number;
+  conversationsCreated: number;
+  conversationUpdates: number;
+  bootstrapUsed: boolean;
   durationMs: number;
   startedAt: string;
   completedAt: string;
@@ -18,6 +25,28 @@ interface SyncRunStatistics {
 
 interface SyncSessionState extends SyncContext, SyncRuntime {
   latestStatistics: SyncRunStatistics | null;
+  initialHistoryCompleted: boolean;
+  historyChatsDiscovered: boolean;
+  bootstrapAttempted: boolean;
+  counters: SyncCounters;
+}
+
+interface SeedContactRecord {
+  id: string;
+  jid: string;
+  display_name: string | null;
+  push_name: string | null;
+  last_seen: string | null;
+}
+
+interface SyncCounters {
+  historyChats: number;
+  chatsUpserted: number;
+  messagesImported: number;
+  contactsImported: number;
+  conversationsCreated: number;
+  conversationUpdates: number;
+  bootstrapUsed: boolean;
 }
 
 const EMPTY_STATS: BulkUpsertStats = {
@@ -41,18 +70,15 @@ function toIsoDate(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function emptyRunStatistics(durationMs: number, startedAt: number): SyncRunStatistics {
-  const startedIso = toIsoDate(startedAt);
-  const completedIso = toIsoDate(startedAt + durationMs);
-
+function createInitialCounters(): SyncCounters {
   return {
-    contacts: cloneEmptyStats(),
-    conversations: cloneEmptyStats(),
-    messages: cloneEmptyStats(),
-    conversationSummaries: cloneEmptyStats(),
-    durationMs,
-    startedAt: startedIso,
-    completedAt: completedIso
+    historyChats: 0,
+    chatsUpserted: 0,
+    messagesImported: 0,
+    contactsImported: 0,
+    conversationsCreated: 0,
+    conversationUpdates: 0,
+    bootstrapUsed: false
   };
 }
 
@@ -95,11 +121,19 @@ export class SyncService {
         connected: false,
         startedAt: null,
         pendingTasks: [],
-        chain: Promise.resolve()
+        chain: Promise.resolve(),
+        initialHistoryCompleted: false,
+        historyChatsDiscovered: false,
+        bootstrapAttempted: false,
+        counters: createInitialCounters()
       }),
       ...context,
       client,
-      latestStatistics: existing?.latestStatistics ?? null
+      latestStatistics: existing?.latestStatistics ?? null,
+      initialHistoryCompleted: existing?.initialHistoryCompleted ?? false,
+      historyChatsDiscovered: existing?.historyChatsDiscovered ?? false,
+      bootstrapAttempted: existing?.bootstrapAttempted ?? false,
+      counters: existing?.counters ?? createInitialCounters()
     };
 
     this.sessions.set(context.sessionId, state);
@@ -259,8 +293,15 @@ export class SyncService {
         );
       }
 
+      const historyChats = event.chats ?? [];
+      if (historyChats.length > 0) {
+        state.historyChatsDiscovered = true;
+        state.counters.historyChats += historyChats.length;
+      }
+
       const contactsResult = await this.runContactSync(state, event.contacts ?? []);
       if (contactsResult.stats.inputCount > 0) {
+        state.counters.contactsImported += contactsResult.stats.persistedCount;
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
@@ -271,8 +312,10 @@ export class SyncService {
       }
 
       const contactIds = new Map(contactsResult.records.map((record) => [record.jid, record.id]));
-      const conversationsResult = await this.runConversationSync(state, event.chats ?? [], contactIds);
+      const conversationsResult = await this.runConversationSync(state, historyChats, contactIds);
       if (conversationsResult.stats.inputCount > 0) {
+        state.counters.conversationsCreated += conversationsResult.stats.createdCount;
+        state.counters.conversationUpdates += conversationsResult.stats.updatedCount;
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
@@ -284,6 +327,8 @@ export class SyncService {
 
       const messagesResult = await this.runMessageSync(state, event.messages ?? [], conversationsResult.byKey);
       if (messagesResult.stats.inputCount > 0) {
+        state.counters.messagesImported += messagesResult.stats.inputCount;
+        state.counters.conversationsCreated += messagesResult.conversationCreations;
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
@@ -297,6 +342,8 @@ export class SyncService {
       if (messagesResult.conversationSummaries.length > 0 && this.conversationRepository) {
         const summaryResult = await this.conversationRepository.bulkUpsertSummaries(state, messagesResult.conversationSummaries);
         summaryStats = summaryResult.stats;
+        state.counters.conversationUpdates += summaryResult.stats.updatedCount;
+        state.counters.conversationsCreated += summaryResult.stats.createdCount;
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
@@ -306,24 +353,51 @@ export class SyncService {
         );
       }
 
-      const durationMs = nowMs() - startedAt;
-      state.latestStatistics = {
-        contacts: contactsResult.stats,
-        conversations: conversationsResult.stats,
-        messages: messagesResult.stats,
-        conversationSummaries: summaryStats,
-        durationMs,
-        startedAt: toIsoDate(startedAt),
-        completedAt: toIsoDate(nowMs())
-      };
-
       if (event.isLatest !== false) {
+        state.initialHistoryCompleted = true;
+        const conversationCount = await this.getConversationCount(state);
+        if (
+          !state.bootstrapAttempted &&
+          !state.historyChatsDiscovered &&
+          contactsResult.records.length > 0 &&
+          conversationCount === 0
+        ) {
+          const bootstrapResult = await this.runContactBootstrap(state, contactsResult.records as SeedContactRecord[]);
+          state.counters.bootstrapUsed = true;
+          state.counters.conversationsCreated += bootstrapResult.stats.createdCount;
+        }
+
+        const durationMs = nowMs() - startedAt;
+        state.latestStatistics = {
+          contacts: contactsResult.stats,
+          conversations: conversationsResult.stats,
+          messages: messagesResult.stats,
+          conversationSummaries: summaryStats,
+          historyChats: state.counters.historyChats,
+          chatsUpserted: state.counters.chatsUpserted,
+          messagesImported: state.counters.messagesImported,
+          contactsImported: state.counters.contactsImported,
+          conversationsCreated: state.counters.conversationsCreated,
+          conversationUpdates: state.counters.conversationUpdates,
+          bootstrapUsed: state.counters.bootstrapUsed,
+          durationMs,
+          startedAt: toIsoDate(startedAt),
+          completedAt: toIsoDate(nowMs())
+        };
+
         this.syncLogger.info(
           {
             sessionId: state.sessionId,
             workspaceId: state.workspaceId,
             connectionId: state.connectionId,
             durationMs,
+            historyChats: state.latestStatistics.historyChats,
+            chatsUpserted: state.latestStatistics.chatsUpserted,
+            messagesImported: state.latestStatistics.messagesImported,
+            contactsImported: state.latestStatistics.contactsImported,
+            conversationsCreated: state.latestStatistics.conversationsCreated,
+            conversationUpdates: state.latestStatistics.conversationUpdates,
+            bootstrapUsed: state.latestStatistics.bootstrapUsed,
             stats: state.latestStatistics
           },
           'Synchronization completed'
@@ -343,6 +417,7 @@ export class SyncService {
       }
 
       const result = await this.runContactSync(state, contacts);
+      state.counters.contactsImported += result.stats.persistedCount;
       this.syncLogger.info(
         {
           sessionId: state.sessionId,
@@ -362,7 +437,14 @@ export class SyncService {
         return;
       }
 
+      if (!state.initialHistoryCompleted) {
+        state.historyChatsDiscovered = true;
+      }
+
       const result = await this.runConversationSync(state, chats);
+      state.counters.chatsUpserted += chats.length;
+      state.counters.conversationsCreated += result.stats.createdCount;
+      state.counters.conversationUpdates += result.stats.updatedCount;
       this.syncLogger.info(
         {
           sessionId: state.sessionId,
@@ -383,6 +465,8 @@ export class SyncService {
       }
 
       const result = await this.runMessageSync(state, messages);
+      state.counters.messagesImported += messages.length;
+      state.counters.conversationsCreated += result.conversationCreations;
       this.syncLogger.info(
         {
           sessionId: state.sessionId,
@@ -420,12 +504,16 @@ export class SyncService {
     return this.contactRepository.bulkUpsert(state, contacts);
   }
 
-  private async runConversationSync(state: SyncContext, chats: SyncChatLike[], contactIds?: Map<string, string>) {
+  private async runConversationSync(state: SyncContext, chats: SyncChatLike[], contactIds?: Map<string, string>): Promise<ConversationWriteResult> {
     if (!this.conversationRepository) {
       this.warnAboutMissingSupabase();
 
       return {
-        stats: cloneEmptyStats(),
+        stats: {
+          ...cloneEmptyStats(),
+          createdCount: 0,
+          updatedCount: 0
+        },
         records: [],
         byKey: new Map<string, ConversationRecord>()
       };
@@ -442,11 +530,60 @@ export class SyncService {
         stats: cloneEmptyStats(),
         records: [],
         byKey: new Map<string, { id: string; conversation_id: string; message_id: string }>(),
-        conversationSummaries: []
+        conversationSummaries: [],
+        conversationCreations: 0
       };
     }
 
     return this.messageRepository.bulkUpsert(state, messages, conversations ?? new Map());
+  }
+
+  private async getConversationCount(state: SyncContext): Promise<number> {
+    if (!this.conversationRepository) {
+      this.warnAboutMissingSupabase();
+      return 0;
+    }
+
+    return this.conversationRepository.countByScope(state.workspaceId, state.connectionId);
+  }
+
+  private async runContactBootstrap(state: SyncSessionState, contacts: SeedContactRecord[]) {
+    if (!this.conversationRepository) {
+      this.warnAboutMissingSupabase();
+
+      return {
+        stats: {
+          ...cloneEmptyStats(),
+          createdCount: 0,
+          updatedCount: 0
+        },
+        records: [],
+        byKey: new Map<string, ConversationRecord>()
+      };
+    }
+
+    const contactIdByJid = new Map(contacts.map((contact) => [contact.jid, contact.id] as const));
+    const seedChats: SyncChatLike[] = contacts.map((contact) => ({
+      jid: contact.jid,
+      name: contact.display_name ?? contact.push_name ?? undefined,
+      archived: false,
+      pinned: false,
+      isGroup: false,
+      unreadCount: 0,
+      conversationTimestamp: contact.last_seen ? Math.floor(Date.parse(contact.last_seen) / 1000) : null
+    }));
+
+    state.bootstrapAttempted = true;
+    this.syncLogger.info(
+      {
+        sessionId: state.sessionId,
+        workspaceId: state.workspaceId,
+        connectionId: state.connectionId
+      },
+      'Using contact bootstrap fallback because no conversations were discovered during initial history sync.'
+    );
+
+    return this.conversationRepository.bulkUpsert(state, seedChats, contactIdByJid);
   }
 
   private warnAboutMissingSupabase(): void {
