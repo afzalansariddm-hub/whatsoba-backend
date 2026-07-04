@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from '../../config/logger';
 import { SUPABASE_SYNC_TABLES } from '../../config/supabase';
 import type { SyncChatLike, SyncContext } from './types';
+import { ensureConversationRowDefaults } from './repositories/conversation-repository';
 
 interface ChatRow {
   workspace_id: string;
@@ -79,17 +80,17 @@ function toChatRow(context: SyncContext, chat: SyncChatLike): ChatRow | null {
           ? 'extendedTextMessage'
           : null,
     last_message_at: lastMessageAt,
-    unread_count: typeof chat.unreadCount === 'number' ? chat.unreadCount : null,
-    is_group: typeof chat.isGroup === 'boolean' ? chat.isGroup : null,
-    is_archived: typeof chat.archived === 'boolean' ? chat.archived : null,
-    is_pinned: typeof chat.pinned === 'boolean' ? chat.pinned : chat.pinned === undefined ? null : Boolean(chat.pinned),
+    unread_count: typeof chat.unreadCount === 'number' ? chat.unreadCount : 0,
+    is_group: typeof chat.isGroup === 'boolean' ? chat.isGroup : false,
+    is_archived: typeof chat.archived === 'boolean' ? chat.archived : false,
+    is_pinned: typeof chat.pinned === 'boolean' ? chat.pinned : false,
     created_at: currentTime,
     updated_at: currentTime
   };
 }
 
 async function upsertChat(supabase: SupabaseClient, row: ChatRow): Promise<void> {
-  const { error } = await supabase.from(SUPABASE_SYNC_TABLES.conversations).upsert(row, {
+  const { error } = await supabase.from(SUPABASE_SYNC_TABLES.conversations).upsert(ensureConversationRowDefaults(row).row, {
     onConflict: 'workspace_id,connection_id,chat_jid'
   });
 

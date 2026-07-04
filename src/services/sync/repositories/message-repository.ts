@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from '../../../config/logger';
 import { SUPABASE_SYNC_TABLES } from '../../../config/supabase';
 import type { SyncContext, SyncMessageLike } from '../types';
-import type { ConversationRecord, ConversationSummaryInput } from './conversation-repository';
+import { ensureConversationRowDefaults, type ConversationRecord, type ConversationSummaryInput } from './conversation-repository';
 import type { BulkUpsertResult } from './types';
 import { dedupeByKey, nowIso, normalizeJid, normalizeKey } from './utils';
 
@@ -277,15 +277,16 @@ export class MessageRepository {
         last_message: null,
         last_message_type: null,
         last_message_at: null,
-        unread_count: null,
-        is_group: chatJid.endsWith('@g.us') ? true : null,
-        is_archived: null,
-        is_pinned: null,
+        unread_count: 0,
+        is_group: false,
+        is_archived: false,
+        is_pinned: false,
         created_at: now,
         updated_at: now
       }));
+      const normalizedPlaceholders = placeholders.map((row) => ensureConversationRowDefaults(row, now).row);
 
-      const { error } = await this.supabaseClient.from(SUPABASE_SYNC_TABLES.conversations).upsert(placeholders, {
+      const { error } = await this.supabaseClient.from(SUPABASE_SYNC_TABLES.conversations).upsert(normalizedPlaceholders, {
         onConflict: 'workspace_id,connection_id,chat_jid'
       });
 

@@ -135,6 +135,49 @@ function extractLastMessage(chat: SyncChatLike): { lastMessage: string | null; l
   };
 }
 
+export function ensureConversationRowDefaults(
+  row: ConversationRow,
+  now: string = nowIso()
+): { row: ConversationRow; defaultedFields: string[] } {
+  const defaultedFields: string[] = [];
+  const normalized: ConversationRow = { ...row };
+
+  if (normalized.unread_count === null || normalized.unread_count === undefined) {
+    normalized.unread_count = 0;
+    defaultedFields.push('unread_count');
+  }
+
+  if (normalized.is_group === null || normalized.is_group === undefined) {
+    normalized.is_group = false;
+    defaultedFields.push('is_group');
+  }
+
+  if (normalized.is_archived === null || normalized.is_archived === undefined) {
+    normalized.is_archived = false;
+    defaultedFields.push('is_archived');
+  }
+
+  if (normalized.is_pinned === null || normalized.is_pinned === undefined) {
+    normalized.is_pinned = false;
+    defaultedFields.push('is_pinned');
+  }
+
+  if (!normalized.created_at) {
+    normalized.created_at = now;
+    defaultedFields.push('created_at');
+  }
+
+  if (!normalized.updated_at) {
+    normalized.updated_at = now;
+    defaultedFields.push('updated_at');
+  }
+
+  return {
+    row: normalized,
+    defaultedFields
+  };
+}
+
 function toConversationRow(
   context: SyncContext,
   chat: SyncChatLike,
@@ -157,10 +200,10 @@ function toConversationRow(
     last_message: lastMessage.lastMessage,
     last_message_type: lastMessage.lastMessageType,
     last_message_at: lastMessage.lastMessageAt,
-    unread_count: typeof chat.unreadCount === 'number' ? chat.unreadCount : null,
-    is_group: typeof chat.isGroup === 'boolean' ? chat.isGroup : chatJid.endsWith('@g.us') ? true : null,
-    is_archived: typeof chat.archived === 'boolean' ? chat.archived : null,
-    is_pinned: typeof chat.pinned === 'boolean' ? chat.pinned : chat.pinned === undefined ? null : Boolean(chat.pinned),
+    unread_count: typeof chat.unreadCount === 'number' ? chat.unreadCount : 0,
+    is_group: typeof chat.isGroup === 'boolean' ? chat.isGroup : false,
+    is_archived: typeof chat.archived === 'boolean' ? chat.archived : false,
+    is_pinned: typeof chat.pinned === 'boolean' ? chat.pinned : false,
     created_at: now,
     updated_at: now
   };
@@ -395,18 +438,23 @@ export class ConversationRepository {
       })
       .filter((row): row is ConversationRow => row !== null);
     const invalidCount = dedupedChats.length - rows.length;
+    const normalizedRows = rows.map((row) => ensureConversationRowDefaults(row, now));
+    const rowsFixed = normalizedRows.filter(({ defaultedFields }) => defaultedFields.length > 0).length;
+    const fieldsDefaulted = Array.from(new Set(normalizedRows.flatMap(({ defaultedFields }) => defaultedFields)));
     const existingByChatJid = await fetchExistingConversations(
       this.supabaseClient,
       context,
-      rows.map((row) => row.chat_jid)
+      normalizedRows.map(({ row }) => row.chat_jid)
     );
 
     repoLogger.info(
       {
         rowsReceived: chats.length,
         rowsDeduped: dedupedChats.length,
-        rowsValid: rows.length,
+        rowsValid: normalizedRows.length,
         rowsSkipped: duplicateCount + invalidCount,
+        rowsFixed,
+        fieldsDefaulted,
         rowsExisting: existingByChatJid.size
       },
       'ConversationRepository rows received'
@@ -415,13 +463,17 @@ export class ConversationRepository {
     let result: ConversationWriteResult;
 
     try {
-      result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+      result = await upsertConversationRows(
+        this.supabaseClient,
+        normalizedRows.map(({ row }) => row),
+        existingByChatJid
+      );
     } catch (error) {
       repoLogger.error(
         {
           err: error,
           rowsReceived: chats.length,
-          rowsValid: rows.length,
+          rowsValid: normalizedRows.length,
           rowsSkipped: duplicateCount + invalidCount
         },
         'ConversationRepository Supabase errors'
@@ -442,7 +494,7 @@ export class ConversationRepository {
     return {
       stats: {
         inputCount: chats.length,
-        validCount: rows.length,
+        validCount: normalizedRows.length,
         duplicateCount,
         existingCount: existingByChatJid.size,
         persistedCount: result.records.length,
@@ -486,17 +538,20 @@ export class ConversationRepository {
           last_message: summary.last_message ?? existing?.last_message ?? null,
           last_message_type: summary.last_message_type ?? existing?.last_message_type ?? null,
           last_message_at: summary.last_message_at ?? existing?.last_message_at ?? null,
-          unread_count: summary.unread_count ?? existing?.unread_count ?? null,
-          is_group: summary.is_group ?? existing?.is_group ?? null,
-          is_archived: summary.is_archived ?? existing?.is_archived ?? null,
-          is_pinned: summary.is_pinned ?? existing?.is_pinned ?? null,
+          unread_count: summary.unread_count ?? existing?.unread_count ?? 0,
+          is_group: summary.is_group ?? existing?.is_group ?? false,
+          is_archived: summary.is_archived ?? existing?.is_archived ?? false,
+          is_pinned: summary.is_pinned ?? existing?.is_pinned ?? false,
           created_at: existing?.created_at ?? now,
           updated_at: now
         } satisfies ConversationRow;
       })
       .filter((row): row is ConversationRow => row !== null);
+    const normalizedRows = rows.map((row) => ensureConversationRowDefaults(row, now));
+    const rowsFixed = normalizedRows.filter(({ defaultedFields }) => defaultedFields.length > 0).length;
+    const fieldsDefaulted = Array.from(new Set(normalizedRows.flatMap(({ defaultedFields }) => defaultedFields)));
 
-    if (rows.length === 0) {
+    if (normalizedRows.length === 0) {
       repoLogger.info(
         {
           rowsReceived: summaries.length,
@@ -504,7 +559,9 @@ export class ConversationRepository {
           rowsInserted: 0,
           rowsUpdated: 0,
           rowsSkipped: duplicateCount + dedupedSummaries.length,
-          persistedCount: 0
+          persistedCount: 0,
+          rowsFixed,
+          fieldsDefaulted
         },
         'ConversationRepository rows received'
       );
@@ -528,8 +585,10 @@ export class ConversationRepository {
       {
         rowsReceived: summaries.length,
         rowsDeduped: dedupedSummaries.length,
-        rowsValid: rows.length,
-        rowsSkipped: duplicateCount + (dedupedSummaries.length - rows.length),
+        rowsValid: normalizedRows.length,
+        rowsSkipped: duplicateCount + (dedupedSummaries.length - normalizedRows.length),
+        rowsFixed,
+        fieldsDefaulted,
         rowsExisting: existingByChatJid.size
       },
       'ConversationRepository rows received'
@@ -538,14 +597,18 @@ export class ConversationRepository {
     let result: ConversationWriteResult;
 
     try {
-      result = await upsertConversationRows(this.supabaseClient, rows, existingByChatJid);
+      result = await upsertConversationRows(
+        this.supabaseClient,
+        normalizedRows.map(({ row }) => row),
+        existingByChatJid
+      );
     } catch (error) {
       repoLogger.error(
         {
           err: error,
           rowsReceived: summaries.length,
-          rowsValid: rows.length,
-          rowsSkipped: duplicateCount + (dedupedSummaries.length - rows.length)
+          rowsValid: normalizedRows.length,
+          rowsSkipped: duplicateCount + (dedupedSummaries.length - normalizedRows.length)
         },
         'ConversationRepository Supabase errors'
       );
@@ -565,11 +628,11 @@ export class ConversationRepository {
     return {
       stats: {
         inputCount: summaries.length,
-        validCount: rows.length,
+        validCount: normalizedRows.length,
         duplicateCount,
         existingCount: existingByChatJid.size,
         persistedCount: result.records.length,
-        invalidCount: dedupedSummaries.length - rows.length,
+        invalidCount: dedupedSummaries.length - normalizedRows.length,
         createdCount: result.stats.createdCount,
         updatedCount: result.stats.updatedCount
       },
